@@ -1,0 +1,487 @@
+package com.pss.reports.generator;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.ObjectOutputStream;
+import java.lang.reflect.Field;
+import java.sql.CallableStatement;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+
+import net.sf.jasperreports.engine.JRException;
+import net.sf.jasperreports.engine.JRParameter;
+import net.sf.jasperreports.engine.JRPrintPage;
+import net.sf.jasperreports.engine.JRResultSetDataSource;
+import net.sf.jasperreports.engine.JRSortField;
+import net.sf.jasperreports.engine.JasperFillManager;
+import net.sf.jasperreports.engine.JasperPrint;
+import net.sf.jasperreports.engine.JasperPrintManager;
+import net.sf.jasperreports.engine.JasperReport;
+import net.sf.jasperreports.engine.data.JRBeanCollectionDataSource;
+import net.sf.jasperreports.engine.design.JRDesignSortField;
+import net.sf.jasperreports.engine.type.SortFieldTypeEnum;
+import net.sf.jasperreports.engine.type.SortOrderEnum;
+import net.sf.jasperreports.engine.type.WhenNoDataTypeEnum;
+import net.sf.jasperreports.engine.util.JRLoader;
+import oracle.jdbc.OracleTypes;
+import org.apache.log4j.Logger;
+import com.pss.constants.PssConstants;
+import com.pss.constants.ReportsConstants;
+import com.pss.dto.report.CommonReportDto;
+import com.pss.exception.PssGenericException;
+import com.pss.util.PssUtil;
+import com.pss.util.ReportSubQuery;
+
+public abstract class AbstractReportGenerator {
+
+	protected Connection con = null;
+
+	protected JasperPrint jasperPrint;
+	protected ReportsConstants reportsConstants;
+	private static final String REPORT_PATH = "REPORT_PATH";
+	private static Logger log = Logger.getLogger(AbstractReportGenerator.class);
+
+	/**
+	 * This method is called by service layer to invoke the Jasper Report
+	 * engine.
+	 * 
+	 * @param commonReportDto
+	 * @throws PssGenericException
+	 */
+	public void genrateReport(CommonReportDto... commonReportDtoArray)
+			throws PssGenericException {
+
+		log.info("--- Start of  genrateReport method ---");
+
+		jasperPrint = fetchJasperPrintObject(commonReportDtoArray);
+		log.info("--- End of  genrateReport method ---");
+	}
+
+	/**
+	 * This method creates a JasperPrint object and place it at specific
+	 * location
+	 * 
+	 * @param commonReportDto
+	 * @return
+	 * @throws PssGenericException
+	 */
+	protected JasperPrint fetchJasperPrintObject(
+			CommonReportDto... commonReportDtoArray) throws PssGenericException {
+
+		JasperPrint print = null;
+		JasperPrint tempPrint = null;
+		ResultSet resultset = null;
+		FileOutputStream fos = null;
+		ObjectOutputStream oos = null;
+		CommonReportDto commonReportDto = commonReportDtoArray[0];
+		String randId = System.currentTimeMillis() + "_"+reportsConstants.getReportTemplate();
+
+		log.info("--- Start of  fetchJasperPrintObject method ---");
+
+		if (commonReportDto.getSortOrderByMap().size() <= 0) {
+			if ((commonReportDto.getSortBy() != null)
+					&& (!PssConstants.EMPTY_STRING.equals(commonReportDto
+							.getSortBy()))) {
+				commonReportDto.getSortOrderByMap().put(
+						commonReportDto.getSortBy(),
+						PssConstants.REPORT_ASCENDING);
+			}
+		}
+		try {
+			JasperReport jasperReport = (JasperReport) JRLoader
+					.loadObjectFromFile(PssUtil.getRealContextPath()
+							+ "reportTemplate/"
+							+ reportsConstants.getReportTemplate());
+/*			System.out.println("Sub Report Path..."+ PssUtil.getRealContextPath()+ "/pssjava/reportTemplate/    ...");
+*/			log.info(" --- start of  setCreatesubReportDataSource method --- ");
+			Map parameters = new HashMap();
+			parameters.put(REPORT_PATH,PssUtil.getRealContextPath()+ "reportTemplate/");
+			for (int i = 0; i < commonReportDtoArray.length; i++) {
+				
+				createSortingOrder(parameters, commonReportDtoArray[i]);
+				createImageParameter(parameters, commonReportDto);
+				setDataParameter(parameters, commonReportDto);
+				if (commonReportDto.isBeanDataSource()) {
+					setBeanDataAsParameter(parameters, commonReportDto);
+				}
+
+				if (commonReportDto.isHasSubReport()) {
+					setCreatesubReportDataSource(parameters, commonReportDto);
+				}
+				
+				setWhenNoDataType(jasperReport,commonReportDto);
+				if (commonReportDtoArray[i].getBeanDataSourceList() == null
+						|| (commonReportDtoArray[i].getBeanDataSourceList()
+								.isEmpty())) {
+					resultset = commonReportDtoArray[i].getResultSet();
+					JRResultSetDataSource datasource = new JRResultSetDataSource(
+							resultset);
+					
+					print = JasperFillManager.fillReport(jasperReport,
+							parameters, datasource);
+				} else {
+					print = JasperFillManager.fillReport(
+							jasperReport,
+							parameters,
+							new JRBeanCollectionDataSource(
+									commonReportDtoArray[i]
+											.getBeanDataSourceList()));
+				}
+
+				if (tempPrint != null) {
+					List<JRPrintPage> pages = print.getPages();
+					for (JRPrintPage page : pages) {
+						tempPrint.addPage(page);
+					}
+					print = tempPrint;
+				} else {
+					tempPrint = print;
+				}
+			}
+
+			if (print.getPages().size() > 0) {
+
+				// When Result set has data.
+				commonReportDto.setStatusFlag(PssConstants.RECORD_FOUND);
+			} else {
+                if(!commonReportDto.isDisplayReportWhenNoData()){
+                	commonReportDto.setStatusFlag(PssConstants.NO_RECORD_FOUND);
+    				return null;
+                }
+				// When Result set does not has data then return null.
+			}
+
+			// Code for local machine
+
+			deleleOldPrintFile(randId, PssUtil.getRealContextPath() + "/"
+					+ PssConstants.JASPER_PRINT_FOLDER_NAME);
+			// Code for DEV Machine
+
+		
+			/*  deleleOldPrintFile(randId,
+			 "/opt/shared/data/pss_java/jasperrpt");*/
+			
+
+			commonReportDto.setRandId(randId);
+
+			// Code for local machine
+		fos = new FileOutputStream(PssUtil.getRealContextPath() + "/"
+					+ PssConstants.JASPER_PRINT_FOLDER_NAME + "/"
+					+ PssConstants.JASPER_PRINT_PREFIX + randId);
+
+			// Code for DEV Machine
+
+			
+		/*	  fos = new
+			  FileOutputStream("/opt/shared/data/pss_java/jasperrpt/jasperprint"
+			  + randId);*/
+			
+
+			oos = new ObjectOutputStream(fos);
+			oos.writeObject(print);
+			commonReportDto.setTemplateFilePath(PssUtil
+					.getRelativeContextPath());
+		} catch (Exception e) {
+
+			// set status if exception occur.
+			commonReportDto.setStatusFlag(PssConstants.EXCEPTION_OCCURED);
+			log.info("-- inside execption --");
+			log.error("Exception occured: ", e);
+			e.printStackTrace();
+			throw new PssGenericException();
+
+		} finally {
+			try {
+				if (oos != null) {
+					oos.flush();
+					oos.close();
+				}
+
+				if (fos != null) {
+					fos.flush();
+					fos.close();
+				}
+				for (int i = 0; i < commonReportDtoArray.length; i++) {
+					if (commonReportDtoArray[i].getResultSet() != null) {
+						commonReportDtoArray[i].getResultSet().close();
+						commonReportDtoArray[i].getStatement().close();
+						commonReportDtoArray[i].getConnection().close();
+					}
+				}
+			} catch (Exception e) {
+				throw new PssGenericException();
+			}
+		}
+
+		log.info("--- End of  fetchJasperPrintObject method ---");
+		return print;
+	}
+
+	/**
+	 * 
+	 * @return
+	 */
+	public ReportsConstants getReportsConstants() {
+
+		return reportsConstants;
+	}
+
+	/**
+	 * 
+	 * @param reportsConstants
+	 */
+	public void setReportsConstants(ReportsConstants reportsConstants) {
+
+		this.reportsConstants = reportsConstants;
+	}
+
+	/**
+	 * Utility method for invoking swing based print dialog box
+	 * 
+	 * @param commonReportDto
+	 * @throws PssGenericException
+	 */
+	protected void printReport(CommonReportDto commonReportDto)
+			throws PssGenericException {
+
+		log.info("--- Strat of  printReport method ---");
+
+		jasperPrint = fetchJasperPrintObject(commonReportDto);
+		try {
+			JasperPrintManager.printReport(jasperPrint, true);
+		} catch (JRException e) {
+
+			log.info("-- inside execption --");
+			log.error("Exception occured: ", e);
+			throw new PssGenericException();
+		}
+
+		log.info("--- End of  printReport method ---");
+	}
+
+	/**
+	 * This method is responsible for creating a sorting order.
+	 * 
+	 * @param parameters
+	 * @param commonReportDto
+	 * @throws PssGenericException
+	 */
+	protected void createSortingOrder(Map parameters,
+			CommonReportDto commonReportDto) throws PssGenericException {
+
+		log.info("--- Strat of  createSortingOrder method ---");
+		List<JRSortField> sortList = new ArrayList<JRSortField>();
+		Iterator<Map.Entry<String, String>> itr = commonReportDto
+				.getSortOrderByMap().entrySet().iterator();
+		while (itr.hasNext()) {
+			Map.Entry<String, String> entry = itr.next();
+			JRDesignSortField sortField = new JRDesignSortField();
+			sortField.setName(entry.getKey());
+			if (entry.getValue() != null
+					&& entry.getValue().equalsIgnoreCase(
+							PssConstants.REPORT_DESCENDING)) {
+				sortField.setOrder(SortOrderEnum.DESCENDING);
+			} else {
+				sortField.setOrder(SortOrderEnum.ASCENDING);
+			}
+			sortField.setType(SortFieldTypeEnum.FIELD);
+			sortList.add(sortField);
+
+		}
+		parameters.put(JRParameter.SORT_FIELDS, sortList);
+		log.info("--- End of  createSortingOrder method ---");
+	}
+
+	/**
+	 * This method configure the report output while data source does not have
+	 * data.
+	 * 
+	 * @param report
+	 */
+	protected void setWhenNoDataType(JasperReport report,CommonReportDto commonReportDto)
+			throws PssGenericException {
+
+		log.info("--- Strat of  setWhenNoDataType method ---");
+
+		report.getWhenNoDataTypeValue();
+		if (commonReportDto.isDisplayReportWhenNoData()) {
+			report.setWhenNoDataType(WhenNoDataTypeEnum.NO_DATA_SECTION);
+		} else {
+			report.setWhenNoDataType(WhenNoDataTypeEnum.NO_PAGES);
+		}
+
+		log.info("--- End of  setWhenNoDataType method ---");
+	}
+
+	/**
+	 * This Method delete old files from given filePath.
+	 * 
+	 * @param randId
+	 * @param filePath
+	 */
+	private void deleleOldPrintFile(String randId, String filePath)
+			throws PssGenericException {
+
+		log.info("--- Strat of  deleleOldPrintFile method ---");
+		String fileName = randId.substring(0, randId.indexOf('_'));
+		long timeCheck = Long.parseLong(fileName)
+				- PssConstants.JASPER_PRINT_DELETION_TIME;
+		File tempFile = new File(filePath);
+		if (tempFile != null) {
+			if (tempFile.listFiles().length > 0) {
+				for (File f1 : tempFile.listFiles()) {
+					if (f1.getName().contains(PssConstants.JASPER_PRINT_PREFIX)) {
+						long fileCreationTime = Long.parseLong(f1
+								.getName()
+								.replace(PssConstants.JASPER_PRINT_PREFIX,
+										PssConstants.EMPTY_STRING)
+								.substring(0, randId.indexOf('_')));
+						if (fileCreationTime < timeCheck) {
+							f1.delete();
+						}
+					}
+				}
+			}
+		}
+
+		log.info("--- End of  deleleOldPrintFile method ---");
+	}
+
+	/**
+	 * This method is being overridden by anonymous classes, So please do not
+	 * delete it.
+	 * 
+	 * @param parameters
+	 * @param commonReportDto
+	 */
+	protected void createImageParameter(Map parameters,
+			CommonReportDto commonReportDto) {
+	}
+
+	/**
+	 * This method is being overridden by anonymous classes, So please do not
+	 * delete it.
+	 * 
+	 * @param parameters
+	 * @param commonReportDto
+	 */
+	protected void setDataParameter(Map parameters,
+			CommonReportDto commonReportDto) {
+	}
+
+	/**
+	 * @author puneet.negi</br> </b>Method Description:</b> This method fetch
+	 *         all the values from bean via reflection and set those value as a
+	 *         parameter into map. Required Condition: Bean must have only
+	 *         string type variable otherwise it will throw an exception.
+	 * @param parameters
+	 * @param commonReportDto
+	 * @throws Exception
+	 */
+	protected void setBeanDataAsParameter(Map parameters,
+			CommonReportDto commonReportDto) throws Exception {
+
+		String fieldName;
+		log.info("--- start of  setBeanDataAsParameter method ---");
+		commonReportDto.getClass().getCanonicalName();
+		Field[] fieldArray = commonReportDto.getClass().getDeclaredFields();
+		for (Field field : fieldArray) {
+			fieldName = field.getName();
+			field.setAccessible(true);
+			parameters.put(fieldName, field.get(commonReportDto));
+			field.setAccessible(false);
+		}
+		log.info("--- end of  setBeanDataAsParameter method ---");
+	}
+
+	
+	/**
+	 *  @author puneet.negi</br>
+	 * This method create dynamic query for sub report and populate the collection data source for sub report.
+	 * @param parameters
+	 * @param commonReportDto
+	 * @throws Exception
+	 */
+	private void setCreatesubReportDataSource(Map parameters,
+			CommonReportDto commonReportDto) throws Exception {
+		
+		Connection con = commonReportDto.getConnection();
+		String mapKey = null;
+		ReportSubQuery reportSubQuery = null;
+		String statmentString=null;
+		ResultSet rs = null;
+		int i = 1;
+		PreparedStatement stmt = null;
+		CallableStatement cstmt = null;
+
+		Iterator<Map.Entry<String, ReportSubQuery>> iterator = commonReportDto
+				.getSubReportQueryMap().entrySet().iterator();
+/*		System.out.println("Sub Report Path..."+ PssUtil.getRelativeContextPath()+ "/pssjava/reportTemplate/    ...");*/		
+		log.info(" --- start of  setCreatesubReportDataSource method --- ");
+		
+		while (iterator.hasNext()) {
+			try {
+				Map.Entry<String, ReportSubQuery> entry = iterator.next();
+				mapKey = entry.getKey();
+				reportSubQuery = entry.getValue();
+				statmentString=reportSubQuery.getStatementString();
+				Object[] paramList=reportSubQuery.getParamArray();
+				
+				if(reportSubQuery.isQuery()){
+					stmt = con.prepareStatement(statmentString);				
+					int index=1;				
+					for(Object param:paramList){
+						stmt.setObject(index, param);
+						index++;
+					}
+					rs = stmt.executeQuery();
+				}
+				else if(reportSubQuery.isProcedure()){
+					cstmt = con.prepareCall(statmentString);				
+					for(int index=1,j=1; j<= paramList.length+1;index++,j++){
+						if(reportSubQuery.getCursorIndex()==index){
+							cstmt.registerOutParameter(reportSubQuery.getCursorIndex(), OracleTypes.CURSOR);
+							index--;
+						}else{							
+						cstmt.setObject(index, paramList[index-1]);
+						}
+					}
+					cstmt.execute();
+					rs = (ResultSet) cstmt.getObject(reportSubQuery.getCursorIndex());	
+				}
+				int colCount=rs.getMetaData().getColumnCount();
+				ArrayList<Map<String, ?>> dataSourceList = new ArrayList<Map<String, ?>>();
+				while (rs.next()) {
+					Map<String, Object> dataMap = new HashMap<String, Object>();
+					for (i = 1; i <= colCount; i++) {
+						dataMap.put(rs.getMetaData().getColumnName(i),
+								rs.getObject(i));
+					}
+					dataSourceList.add(dataMap);
+				}
+				parameters.put(mapKey, dataSourceList);
+			} catch (Exception e) {
+				log.error("Error occured: " + e);
+			} finally {
+				
+				if (rs != null) {
+					rs.close();
+				}
+				if (stmt != null) {
+					stmt.close();
+				}
+				if (cstmt != null) {
+					cstmt.close();
+				}
+			}
+		}
+		log.info(" --- End of  setCreatesubReportDataSource method --- ");
+	}
+
+}
